@@ -1,0 +1,13 @@
+shiny
+knitr
+kableExtra
+dplyr
+ggplot2
+tidyr
+corrplot
+RColorBrewer
+scales
+plotly
+factoextra
+fpc
+NbClust

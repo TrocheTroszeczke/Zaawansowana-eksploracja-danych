@@ -1,0 +1,341 @@
+---
+title: "Zaawansowana eksploracja danych: Materials Project"
+author: "Anna Czachorek 148191"
+output: 
+  html_document: 
+    toc: yes
+    toc_float: yes
+    theme: spacelab
+    number_sections: yes
+    self_contained: yes
+date: "`r Sys.Date()`"
+runtime: shiny
+---
+
+```{css, echo=FALSE}
+.header-section-number::after {
+  content: ".";
+}
+```
+
+
+Projekt ma na celu analizę danych opisujących materiały wykorzystywane przy tworzeniu baterii. Dane pochodzą z bazy danych _Material Projects_, udostępnianej przez Departament Energii USA.
+
+# Przygotowanie środowiska
+
+## Wykorzystane biblioteki
+
+```{r libraries, message=FALSE, warning=FALSE}
+library(knitr)
+library(kableExtra)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(corrplot)
+library(RColorBrewer) 
+library(scales)
+library(plotly)
+library(shiny)
+library(factoextra)
+library(fpc)
+library(NbClust)
+```
+
+## Zapewnienie powtarzalności wyników
+
+Powtarzalność rezultatów podczas kolejnych wykonań skryptu można zagwarantować poprzez ustawienie wartości ziarna (`seed`) na konkretną stałą.
+
+```{r seed}
+set.seed(25)
+```
+
+
+# Przygotowanie danych
+
+## Wczytanie danych
+Dane znajdują się w pliku CSV `mp_batteries.csv`.
+
+```{r loadData, message=FALSE, warning=FALSE}
+initial <- read.csv("mp_batteries.csv", nrows = 100)
+classes <- sapply(initial, class)
+df <- read.csv("mp_batteries.csv", colClasses = classes)
+```
+
+## Prezentacja próbki danych
+
+```{r showData, echo=FALSE}
+kable(head(df, 8)) %>%
+  kable_styling("striped") %>%
+  scroll_box(width="100%")
+```
+
+
+# Podsumowanie zbioru danych
+
+## Rozmiar i zawartość zbioru danych
+
+```{r dataProperties, echo=FALSE}
+nr_rows = count(df)
+nr_col = ncol(df)
+incomplete = nr_rows - count(df[complete.cases(df),])
+```
+
+
+Zbiór danych składa się z `r nr_rows` wierszy i `r nr_col` kolumn. `r if (incomplete == 0) "Nie zawiera wartości pustych" else paste("Zawiera", incomplete, "wartości pustych")`.
+
+Kolumny odpowiadają następującym danym:
+
+- `Battery ID`: Identyfikator baterii.
+- `Battery Formula`: Wzór chemiczny materiału baterii.
+- `Working Ion`: Główny jon, który odpowiada za transport ładunku w baterii.
+- `Formula Charge`: Wzór chemiczny materiału baterii w stanie naładowanym.
+- `Formula Discharge`: Wzór chemiczny materiału baterii w stanie rozładowanym.
+- `Max Delta Volume`: Zmiana objętości w % dla danego kroku napięcia za pomocą wzoru:
+`max(charge, discharge)/min(charge, discharge) -1`.
+- `Average Voltage`: Średnie napięcie dla poszczególnego kroku napięcia.
+- `Gravimetric Capacity`: Pojemność grawimetryczna, czyli ilość energii na jednostkę masy (mAh/g).
+- `Volumetric Capacity`: Pojemność wolumetryczna, czyli ilość energii na jednostkę objętości (mAh/cm³).
+- `Gravimetric Energy`: Gęstość energii w odniesieniu do masy baterii (Wh/kg).
+- `Volumetric Energy`: Gęstość energii w odniesieniu do objętości baterii (Wh/L).
+- `Atomic Fraction Charge`: Udział atomowy składników w stanie naładowanym.
+- `Atomic Fraction Discharge`: Udział atomowy składników w stanie rozładowanym.
+- `Stability Charge`: Wskaźnik stabilności materiału w stanie naładowanym.
+- `Stability Discharge`: Wskaźnik stabilności materiału w stanie rozładowanym.
+- `Steps`: Liczba odrębnych kroków napięcia od pełnego naładowania do rozładowania, oparta na stabilnych stanach pośrednich.
+- `Max Voltage Step`: Maksymalna bezwzględna różnica między sąsiednimi krokami napięcia.
+
+
+## Szczegółowa analiza wartości atrybutów
+
+### Rozkład wartości liczbowych
+
+```{r histograms, echo=FALSE, message=FALSE, warning=FALSE, fig.height=16, fig.width=8}
+numeric_cols <- df %>% select(where(is.numeric))
+
+histogram_plot <- numeric_cols %>%
+  gather() %>%
+  ggplot(aes(x = value)) +
+  geom_histogram(bins = 25, fill = "blue", color = "white", alpha = 0.7) +
+  facet_wrap(~key, scales = "free", ncol = 3) +
+  labs(
+    title = "Histogramy dla kolumn liczbowych",
+    x = "Wartość",
+    y = "Częstotliwość"
+  ) +
+  theme_minimal() +
+  theme(aspect.ratio = 1,
+        plot.title = element_text(hjust = 0.5))
+
+ggplotly(histogram_plot)
+```
+Można zauważyć, że większość przedstawionych zbiorów danych ma rozkład zbliżony do normalnego, jednak prawostronnie skośny. Oznacza to, że znaczna część wartości skupia się po lewej stronie od średniej, a ogon rozkładu jest dłuższy po prawej stronie. W zbiorze danych występuje kilka wartości wyraźnie większych, które mogą opisywać baterie produkowane według nowatorskich metod lub takie o nietypowym, specyficznym przeznaczeniu.
+
+### Rozkład wartości nieliczbowych
+
+Wartości nieliczbowych nie da się zaprezentować w postaci histogramu, dlatego dla każdej kolumny wybrano 10 najczęściej występujących wartości i przedstawiono na wykresie słupkowym ich częstotliwość występowania.
+
+```{r geombars, echo=FALSE, message=FALSE, warning=FALSE, fig.height=10, fig.width=8}
+non_numeric_cols <- df %>% select(where(~ !is.numeric(.)))
+
+non_numeric_long <- non_numeric_cols %>%
+  gather(key = "column", value = "value") %>%
+  group_by(column, value) %>%
+  summarise(freq = n(), .groups = "drop") %>%
+  arrange(column, desc(freq)) %>%
+  group_by(column) %>%
+  slice_head(n = 10)  # 10 najczęstszych wartości dla każdej kolumny
+
+geombars_plot <- ggplot(non_numeric_long, aes(x = reorder(value, -freq), y = freq)) +
+  geom_bar(stat = "identity", fill = "blue", color = "white", alpha = 0.7) +
+  facet_wrap(~column, scales = "free", ncol = 3) +
+  labs(
+    title = "Najczęstsze wartości w kolumnach nieliczbowych",
+    x = "Wartość",
+    y = "Częstotliwość"
+  ) +
+  coord_flip() +
+  scale_y_continuous(
+    breaks = function(x) seq(0, max(x), by = max(1, floor(max(x) / 5))),
+    expand = expansion(mult = c(0, 0.1))
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    axis.text.x = element_text(size = 8, angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 8)
+  )
+
+ggplotly(geombars_plot)
+
+```
+
+Kolumna Battery.ID ma unikalne wartości, co jest zgodne z zastosowaniem tej wartości jako identyfikator.
+
+Kolumny Battery.Formula, Formula.Charge I Formaula.Discharge odnoszą się do wzorów chemicznych baterii w różnych stanach. Wzory te, mimo że nie są unikalne dla poszczególnych baterii, przyjmują bardzo zróżnicowane wartości. Przyczyn takiego zjawiska może być wiele, na przykład: specyficzne przeznaczenie baterii, zróżnicowane badania chemiczne różnych producentów, nowatorskie rozwiązania.
+
+Największa powtarzalność wartości występuje w kolumnie Working.Ion, reprezentującej jon transportujący ładunek w baterii. Zdecydowanie najczęściej występującym jonem jest lit - pojawia się 2440 razy, kiedy drugi co do częstotliwości występowania wapń pojawia się 435 razy.
+
+
+# Korelacje między atrybutami
+
+## Macierz korelacji
+
+Żeby odkryć, jaki wpływ mają na siebie poszczególne kolumny, warto zbadać korelacje między nimi. Poniżej zaprezentowano macierz korelacji. Wartości przedstawiają współczynnik korelacji Pearosna między kolumnami.
+
+```{r correlation, echo=FALSE, message=FALSE, warning=FALSE, fig.height=8, fig.width=10}
+M <- cor(numeric_cols)
+corrplot(M, 
+         method="color", 
+         type="upper", 
+         addCoef.col = "black", 
+         diag = FALSE,
+         tl.col = "blue",
+         tl.srt = 45,
+         tl.cex = 0.9)
+```
+
+Jak można zauważyć, duży wpływ na siebie mają kolumny Gravimetric.Energy i Volumetric.Energy, Gravimetric.Capacity i Volumetric.Capacity, a także Stability.Charge i Stability.Discharge. Widoczne są także trochę mniej oczywiste korelacje: między Gravimetric.Capacity i Atomic.Fraction.Discharge oraz Gravimetric.Energy i Average.Voltage. Powiązania te mogą wynikać ze składu chemicznego baterii.
+
+## Wpływ głównego jonu na właściwości baterii
+
+Warto zbadać także wpływ jonu transportującego ładunek baterii, opisanego w kolumnie Working.Ion, na wartości liczbowe w zbiorze danych. Ta zależność nie jest widoczna w macierzy korelacji, ponieważ wskaźnik Pearsona służy do badania wzajemnego wpływu na siebie wartości liczbowych. Jednocześnie, w tej analizie można pominąć pozostałe kolumny nieliczbowe, ponieważ nawet maksymalna częstotliwość występowania w nich wartości jest zbyt niska, aby uznać taką próbkę za reprezentatywną.
+
+```{r interactive, echo=FALSE, message=FALSE, warning=FALSE, fig.height=8, fig.width=10}
+sliderInput("bins", "Liczba przedziałów:", 
+            min = 5, max = 50, value = 30)
+
+selectInput("selected_column", "Wybierz kolumnę:", 
+            choices = names(numeric_cols), 
+            selected = "Volumetric.Energy")
+
+renderPlot({
+  top_ions <- df %>%
+    count(Working.Ion, sort = TRUE) %>%
+    head(5) %>%
+    pull(Working.Ion)
+  
+  df_filtered <- df %>%
+    mutate(Working.Ion = ifelse(Working.Ion %in% top_ions, Working.Ion, "inne"))
+  
+  ggplot(df_filtered, aes(x = .data[[input$selected_column]], fill = Working.Ion)) +
+    geom_histogram(bins = input$bins, color = "white", position = "stack") +
+    labs(
+      title = paste("Histogram dla kolumny:", input$selected_column),
+      x = input$selected_column,
+      y = "Częstotliwość"
+    ) +
+    theme_minimal() +
+    scale_fill_brewer(palette = "Set2")
+})
+
+```
+
+Wykresy pokazują, że rozkład różnych jonów jest podobny niezależnie od badanej kolumny.
+
+# Predykcja jonu na podstawie właściwości baterii
+
+## Cel
+
+Żeby ocenić powiązanie głównego jonu z właściwościami baterii, przeprowadzono grupowanie danych algorytmem k-means w zbiorze, z którego usunięto kolumnę Working.Ion. Jeśli algorytm poprawnie przeprowadzi grupowanie, można wysnuć wniosek, że każdy jon niesie za sobą określone właściwości baterii.
+
+## Przygotowanie danych
+
+Na początku należy usunąć kolumnę opisującą jon. Warto usunąć także kolumny tekstowe, ponieważ według wcześniejszych analiz kolumny te zawierały zbyt zróżnicowane wartości, żeby można je było wykorzystać do analizy. Oznacza to, żedo predykcji można wykorzystać zbiór powstały po odfiltrowaniu wszystkich danych tekstowych, w tym informacji głównym jonie.
+
+Trzeba też zmniejszyć liczbę wymiarów, skalując dane.
+
+```{r kmeans1, echo=TRUE, message=FALSE, warning=FALSE}
+df_prediction <- df %>% select(where(is.numeric))
+df_scaled <- scale(df_prediction)
+```
+
+## Grupowanie algorytmem k-means
+
+Utworzone zostanie tyle grup, ile różnych wartości występuje w kolumnie Working.Ion. Działanie to pozwoli ocenić, czy poszczególne jony powodują tak dużą zmianę właściwości, aby znaleźć się w oddzielnych grupach.
+
+```{r kmeans2, echo=TRUE, message=FALSE, warning=FALSE}
+
+num_groups <- length(unique(df$Working.Ion))
+km.res <- eclust(df_scaled, "kmeans", k = num_groups, nstart = 10, graph = F)
+
+```
+
+## Analiza wyniku
+
+Poniżej przedstawiono wynik grupowania. Kolory pokazują rzeczywiste jony występujące w bateriach, a kształty punktów - utworzone klastry.
+
+```{r kmeans3, echo=FALSE, message=FALSE, warning=FALSE, cache=TRUE}
+
+pca_result <- prcomp(df_scaled, center = TRUE, scale. = TRUE)
+df$feature1 <- pca_result$x[, 1]
+df$feature2 <- pca_result$x[, 2]
+
+df$true_class <- factor(df$Working.Ion)  # Prawdziwa klasa
+df$predicted_cluster <- factor(km.res$cluster)  # Przewidywany klaster
+
+kmeans_plot <- ggplot(df, aes(x = feature1, y = feature2)) +
+  geom_point(aes(color = true_class, shape = predicted_cluster), size = 3) +
+  theme_minimal() +
+  labs(
+    title = "Porównanie jonów i utworzonych klastrów",
+    x = "PCA 1",
+    y = "PCA 2",
+    color = "Prawdziwy jon",
+    shape = "Klaster"
+  ) +
+  scale_color_brewer(palette = "Paired") +
+  scale_shape_manual(values = c(0:9))
+
+ggplotly(kmeans_plot)
+```
+
+Żeby lepiej zobaczyć zależności między rzeczywistym jonem a dopasowanym klastrem, warto przyjrzeć się wykresowi punktowemu.
+
+```{r kmeansResult, echo=FALSE, message=FALSE, warning=FALSE, cache=TRUE}
+library(ggplot2)
+
+cross_table <- table(Ion = df$true_class, Predicted = df$predicted_cluster)
+percent_in_cluster <- prop.table(cross_table, margin = 2) * 100  # % w klastrze
+percent_of_ion <- prop.table(cross_table, margin = 1) * 100      # % jonu w klastrze
+
+percent_df <- as.data.frame(as.table(cross_table))
+percent_df$PercentInCluster <- as.vector(percent_in_cluster)
+percent_df$PercentOfIon <- as.vector(percent_of_ion)
+
+ggplot(percent_df, aes(x = Predicted, y = Ion)) +
+  geom_point(aes(size = PercentOfIon, color = PercentInCluster), alpha = 0.7) +
+  scale_color_gradient(low = "lightblue", high = "darkblue") +
+  labs(
+    title = "Rozkład procentowy jonu i klastra",
+    x = "Klaster",
+    y = "Jon",
+    size = "ile % jonu należy do danego klastra",
+    color = "ile % klastra to dany jon"
+  ) +
+  theme_minimal()
+```
+
+Jak widać, lit zajmuje znaczną część wszystkich klastrów. To jednak nie wskazuje na błędną klasyfikację, ale pokazuje, że jest to zdecydowanie najczęściej wykorzystywany pierwiastek. Jak wiadomo, pierwiastki leżące blisko siebie w układzie okresowym mają podobne właściwości. Potwierdza to klastrowanie: na przykład magnez, cez i potas, trzy pierwiastki z grupy metali alkaicznych, zostały przydzielone przede wszystkim do 2. i 7. klastra. Mimo że widać pewne zależności, wiele jonów występuje zbyt rzadko w zbiorze danych, żeby ocena była precyzyjna.
+
+
+# Wnioski - podsumowanie obecnych trendów
+
+Przeprowadzona analiza pozwala sformułować następujące spostrzeżenia o bieżących trendach w produkcji baterii:
+
+1. __Najpopularniejszym pierwiastkiem pełniącym rolę głównego jonu jest lit.__ 
+Baterie wykorzystujące lit wykorzystywane są m.in w smartfonów. Producent urządzeń elektronicznych Apple tak uzasadnia wykorzystywanie baterii litowo-jonowych: 
+
+_W porównaniu z tradycyjną technologią baterii, baterie litowo-jonowe ładują się szybciej, działają dłużej i mają większą gęstość mocy, co zapewnia dłuższy czas pracy baterii w lżejszym opakowaniu._ (za: https://www.apple.com/in/batteries/why-lithium-ion/)
+
+2. __Główny jon baterii ma pewien wpływ na pozostałe właściwości.__
+
+Można pogrupować baterie w sposób pokazujący zależności pozostałych właściwości z głównym jonem, ale warto pamiętać, że to nie jedyny czynnik wpływający na cechy baterii.
+
+3. __Wzory chemiczne baterii są zróżnicowane i zależne od przeznaczenia.__
+Nie istnieje uniwersalny wzór baterii - zarówno w stanie ogólnym, jak i naładowanym czy rozładowanym. Formuły chemiczne baterii różnią się w zależności od producenta, a także od docelowego zastosowania urządzenia. Właściwości baterii, takie jak pojemność, trwałość czy wydajność, wynikają bezpośrednio z tych formuł i są dostosowywane do konkretnych wymagań.
+
+4. __Poszukuje się ekologicznych alternatyw dla baterii wykorzystujących lit.__
+W ostatnim czasie dużo uwagi w przemyśle poświęca się ekologicznym rozwiązaniom. To sprawia, że producenci chcą inwestować w bardziej zrównoważone alternatywy dla baterii litowo-jonowych. Lit jest surowcem wydobywanym w dużych ilościach, a jego zasoby nie są nieskończone. To sprawia, że popularność zyskują technologie pozwalające na recykling zużytych baterii, a także próby zastąpienia litu innymi materiałami o podobnych właściwościach, takie jak sód, magnez czy cynk.
+
+
+
